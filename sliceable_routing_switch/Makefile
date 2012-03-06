@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011 NEC Corporation
+# Copyright (C) 2011-2012 NEC Corporation
 #
 
 TREMA = ../../trema
@@ -11,7 +11,7 @@ CFLAGS = $(shell $(TREMA)/trema-config --cflags) -I$(TREMA_APPS)/topology -std=g
 LDFLAGS = $(shell $(TREMA)/trema-config --libs) -L$(TREMA_APPS)/topology -ltopology
 
 TARGET = sliceable_routing_switch
-SRCS = fdb.c filter.c libpathresolver.c port.c sliceable_routing_switch.c slice.c redirector.c
+SRCS = fdb.c filter.c libpathresolver.c port.c sliceable_routing_switch.c slice.c redirector.c file_modification_watcher.c
 OBJS = $(SRCS:.c=.o)
 
 FEATURES = help.feature

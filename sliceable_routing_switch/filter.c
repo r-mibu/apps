@@ -1,7 +1,7 @@
 /*
  * Author: Yasunobu Chiba
  *
- * Copyright (C) 2008-2011 NEC Corporation
+ * Copyright (C) 2008-2012 NEC Corporation
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2, as
@@ -20,11 +20,8 @@
 
 #include <errno.h>
 #include <linux/limits.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <sqlite3.h>
+#include "file_modification_watcher.h"
 #include "filter.h"
 
 
@@ -58,7 +55,6 @@ typedef struct {
 
 
 static filter_table filter_db;
-static time_t last_filter_db_mtime = 0;
 static char filter_db_file[ PATH_MAX ];
 
 
@@ -365,24 +361,9 @@ load_filter_entries_from_sqlite( void *user_data ) {
 
   char *err;
   int ret;
-  struct stat st;
   sqlite3 *db;
 
-  memset( &st, 0, sizeof( struct stat ) );
-
-  ret = stat( filter_db_file, &st );
-  if ( ret < 0 ) {
-    error( "Failed to stat %s (%s).", filter_db_file, strerror( errno ) );
-    return;
-  }
-  if ( st.st_mtime == last_filter_db_mtime ) {
-    debug( "Filter database is not changed." );
-    return;
-  }
-
   info( "Loading filter definitions." );
-
-  last_filter_db_mtime = st.st_mtime;
 
   delete_filter_db();
   create_filter_db();
@@ -425,9 +406,7 @@ init_filter( const char *file ) {
 
   load_filter_entries_from_sqlite( NULL );
 
-  add_periodic_event_callback( FILTER_DB_UPDATE_INTERVAL,
-                               load_filter_entries_from_sqlite,
-                               NULL );
+  add_file_modification_watch( filter_db_file, load_filter_entries_from_sqlite, NULL );
 
   return true;
 }
@@ -435,6 +414,8 @@ init_filter( const char *file ) {
 
 bool
 finalize_filter() {
+  delete_file_modification_watch( filter_db_file );
+
   delete_filter_db();
   memset( filter_db_file, '\0', sizeof( filter_db_file ) );
 

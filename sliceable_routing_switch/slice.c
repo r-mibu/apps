@@ -1,7 +1,7 @@
 /*
  * Author: Yasunobu Chiba, Lei SUN
  *
- * Copyright (C) 2008-2011 NEC Corporation
+ * Copyright (C) 2008-2012 NEC Corporation
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2, as
@@ -19,14 +19,11 @@
 
 
 #include <errno.h>
-#include <inttypes.h>
 #include <linux/limits.h>
 #include <sqlite3.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include "slice.h"
 #include "port.h"
+#include "file_modification_watcher.h"
 #include "filter.h"
 
 
@@ -73,7 +70,6 @@ static bool restrict_hosts_on_port = false;
 
 static char slice_db_file[ PATH_MAX ];
 static slice_table slice_db;
-static time_t last_slice_db_mtime = 0;
 
 static routing_switch *switch_instance = NULL;
 
@@ -549,25 +545,9 @@ load_slice_definitions_from_sqlite( void *user_data ) {
 
   char *err;
   int ret;
-  struct stat st;
   sqlite3 *db;
 
-  memset( &st, 0, sizeof( struct stat ) );
-
-  ret = stat( slice_db_file, &st );
-  if ( ret < 0 ) {
-    error( "Failed to stat %s (%s).", slice_db_file, strerror( errno ) );
-    return;
-  }
-
-  if ( st.st_mtime == last_slice_db_mtime ) {
-    debug( "Slice database is not changed." );
-    return;
-  }
-
   info( "Loading slice definitions." );
-
-  last_slice_db_mtime = st.st_mtime;
 
   delete_slice_db();
 
@@ -631,13 +611,9 @@ init_slice( const char *file, uint16_t mode , routing_switch *instance ) {
 
   load_slice_definitions_from_sqlite( NULL );
 
-  add_periodic_event_callback( SLICE_DB_UPDATE_INTERVAL,
-                               load_slice_definitions_from_sqlite,
-                               NULL );
+  add_file_modification_watch( slice_db_file, load_slice_definitions_from_sqlite, NULL );
 
-  add_periodic_event_callback( BINDING_AGING_INTERVAL,
-                               age_dynamic_port_slice_bindings,
-                               NULL );
+  add_periodic_event_callback( BINDING_AGING_INTERVAL, age_dynamic_port_slice_bindings, NULL );
 
   if ( mode & LOOSE_MAC_BASED_SLICING ) {
     loose_mac_based_slicing = true;
@@ -652,6 +628,8 @@ init_slice( const char *file, uint16_t mode , routing_switch *instance ) {
 
 bool
 finalize_slice() {
+  delete_file_modification_watch( slice_db_file );
+
   delete_slice_db();
   memset( slice_db_file, '\0', sizeof( slice_db_file ) );
   switch_instance = NULL;
