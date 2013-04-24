@@ -25,13 +25,14 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include "fdb.h"
 #include "libpath.h"
 #include "slice.h"
 #include "port.h"
 #include "filter.h"
 
 
-#define SLICE_DB_UPDATE_INTERVAL 30
+#define SLICE_DB_UPDATE_INTERVAL 2
 
 #define BINDING_AGING_INTERVAL 60
 #define BINDING_TIMEOUT 3600
@@ -50,6 +51,7 @@ typedef struct {
   char id[ BINDING_ID_LENGTH ];
   uint16_t slice_number;
   bool dynamic;
+  bool found_in_sqlite;
   time_t updated_at;
 } binding_entry;
 
@@ -59,6 +61,7 @@ typedef struct {
   uint16_t number;
   char id[ SLICE_NAME_LENGTH ];
   uint16_t n_mac_slice_maps;
+  bool found_in_sqlite;
 } slice_entry;
 
 typedef struct {
@@ -242,57 +245,93 @@ delete_slice_db() {
 
 
 static void
+delete_slice_found_in_sqlite_flag( void *key, void *value, void *user_data ) {
+  ( ( slice_entry * ) value)->found_in_sqlite = false;
+}
+
+
+static void
+delete_binding_found_in_sqlite_flag( void *key, void *value, void *user_data ) {
+  ( ( binding_entry * ) value)->found_in_sqlite = false;
+}
+
+
+static void
+clean_found_in_sqlite_flags() {
+  foreach_hash( slice_db.slices, delete_slice_found_in_sqlite_flag, NULL );
+  foreach_hash( slice_db.port_slice_map, delete_binding_found_in_sqlite_flag, NULL );
+  foreach_hash( slice_db.mac_slice_map, delete_binding_found_in_sqlite_flag, NULL );
+  foreach_hash( slice_db.port_mac_slice_map, delete_binding_found_in_sqlite_flag, NULL );
+}
+
+
+static void
 add_slice_entry( uint16_t number, const char *id ) {
-  slice_entry *entry;
+  assert( id );
 
-  entry = xmalloc( sizeof( slice_entry ) );
+  slice_entry *found = lookup_hash_entry( slice_db.slices, &number );
+  if ( found != NULL ) {
+    found->found_in_sqlite = true;
+    debug( "Slice entry is already registered ( number = %#x, id = %s ).",
+           found->number, found->id );
+    return;
+  }
 
+  slice_entry *entry = xmalloc( sizeof( slice_entry ) );
   entry->number = number;
   memset( entry->id, '\0', SLICE_NAME_LENGTH );
   memcpy( entry->id, id, SLICE_NAME_LENGTH - 1 );
   entry->n_mac_slice_maps = 0;
+  entry->found_in_sqlite = true;
 
-  if ( lookup_hash_entry( slice_db.slices, entry ) != NULL ) {
-    xfree( entry );
-    warn( "Slice entry is already registered ( number = %#x, id = %s ).", number, id );
-    return;
-  }
-
+  info( "Adding a slice entry ( number = %#x, id = %s )", entry->number, entry->id );
   insert_hash_entry( slice_db.slices, entry, entry );
 }
 
 
 static void
 add_port_slice_binding( uint64_t datapath_id, uint16_t port, uint16_t vid, uint16_t slice_number, const char *id, bool dynamic ) {
-  binding_entry *entry;
+  assert( id );
 
-  entry = xmalloc( sizeof( binding_entry ) );
-
-  memset( entry, 0, sizeof( binding_entry ) );
-  entry->type = BINDING_TYPE_PORT;
-  entry->datapath_id = datapath_id;
-  entry->port = port;
-  entry->vid = vid;
-  entry->slice_number = slice_number;
-  memset( entry->id, '\0', sizeof( entry->id ) );
-  if ( id != NULL ) {
-    memcpy( entry->id, id, sizeof( entry->id ) - 1 );
-  }
-  entry->dynamic = dynamic;
-  entry->updated_at = time( NULL );
-
-  info( "Adding a port-slice binding ( type = %#x, datapath_id = %#" PRIx64
-        ", port = %#x, vid = %#x, slice_number = %#x, id = %s, dynamic = %d, updated_at = %" PRId64 " ).",
-        entry->type, datapath_id, port, vid, slice_number, id, dynamic, ( int64_t ) entry->updated_at );
-
-  if ( lookup_hash_entry( slice_db.port_slice_map, entry ) != NULL ) {
-    xfree( entry );
-    warn( "Port-slice entry is already registered ( datapath_id = %#" PRIx64
-          ", port = %u, vid = %u, slice_number = %#x, dynamic = %d ).",
-          datapath_id, port, vid, slice_number, dynamic );
+  slice_entry *slice = lookup_hash_entry( slice_db.slices, &slice_number );
+  if ( slice == NULL ) {
+    error( "Invalid slice number ( %#x ).", slice_number );
     return;
   }
 
+  binding_entry e;
+
+  /* set required parameters to lookup_hash_entry() in port_slice_map */
+  memset( &e, 0, offsetof( binding_entry, mac ) );
+  e.type = BINDING_TYPE_PORT;
+  e.datapath_id = datapath_id;
+  e.port = port;
+  e.vid = vid;
+
+  binding_entry *found = lookup_hash_entry( slice_db.port_slice_map, &e );
+  if ( found != NULL ) {
+    found->found_in_sqlite = true;
+    debug( "Port-slice entry is already registered ( datapath_id = %#" PRIx64 ", "
+           "port = %u, vid = %u, id = %s, slice_number = %#x, dynamic = %d ).",
+           found->datapath_id,
+           found->port, found->vid, found->id, found->slice_number, found->dynamic );
+    return;
+  }
+
+  binding_entry *entry = xmalloc( sizeof( binding_entry ) );
+  memset( entry, 0, sizeof( binding_entry ) );
+  memcpy( entry, &e, offsetof( binding_entry, mac ) );
+  memset( entry->id, '\0', BINDING_ID_LENGTH );
+  memcpy( entry->id, id, BINDING_ID_LENGTH - 1 );
+  entry->slice_number = slice_number;
+  entry->dynamic = dynamic;
+  entry->found_in_sqlite = true;
+  entry->updated_at = time( NULL );
+
+  info( "Adding a port-slice binding ( datapath_id = %#" PRIx64 ", port = %#x, vid = %#x, "
+        "id = %s, slice_number = %#x, dynamic = %d, updated_at = %" PRId64 " ).",
+        entry->datapath_id, entry->port, entry->vid,
+        entry->id, entry->slice_number, entry->dynamic, ( int64_t ) entry->updated_at );
   insert_hash_entry( slice_db.port_slice_map, entry, entry );
   insert_hash_entry( slice_db.port_slice_vid_map, entry, entry );
 }
@@ -300,37 +339,47 @@ add_port_slice_binding( uint64_t datapath_id, uint16_t port, uint16_t vid, uint1
 
 static void
 add_mac_slice_binding( const uint8_t *mac, uint16_t slice_number, const char *id ) {
+  assert( mac );
+  assert( id );
+
   slice_entry *slice = lookup_hash_entry( slice_db.slices, &slice_number );
   if ( slice == NULL ) {
-    error( "Invalid slice number ( #%x ).", slice_number );
+    error( "Invalid slice number ( %#x ).", slice_number );
+    return;
+  }
+
+  binding_entry e;
+
+  /* set required parameters to lookup_hash_entry() in mac_slice_map */
+  memset( &e, 0, offsetof( binding_entry, id ) );
+  e.type = BINDING_TYPE_MAC;
+  memcpy( e.mac, mac, OFP_ETH_ALEN );
+
+  binding_entry *found = lookup_hash_entry( slice_db.mac_slice_map, &e );
+  if ( found != NULL ) {
+    found->found_in_sqlite = true;
+    debug( "Mac-slice entry is already registered ( mac = %02x:%02x:%02x:%02x:%02x:%02x, "
+           "id = %s, slice_number = %#x ).",
+           found->mac[ 0 ], found->mac[ 1 ], found->mac[ 2 ], found->mac[ 3 ], found->mac[ 4 ], found->mac[ 5 ],
+           found->id, found->slice_number );
     return;
   }
 
   binding_entry *entry = xmalloc( sizeof( binding_entry ) );
-
   memset( entry, 0, sizeof( binding_entry ) );
-  entry->type = BINDING_TYPE_MAC;
-  memcpy( entry->mac, mac, OFP_ETH_ALEN );
+  entry->type = e.type;
+  memcpy( entry->mac, e.mac, OFP_ETH_ALEN );
+  memset( entry->id, '\0', BINDING_ID_LENGTH );
+  memcpy( entry->id, id, BINDING_ID_LENGTH - 1 );
   entry->slice_number = slice_number;
-  memset( entry->id, '\0', sizeof( entry->id ) );
-  if ( id != NULL ) {
-    memcpy( entry->id, id, sizeof( entry->id ) - 1 );
-  }
   entry->dynamic = false;
+  entry->found_in_sqlite = true;
   entry->updated_at = time( NULL );
 
-  info( "Adding a mac-slice binding ( type = %#x, %02x:%02x:%02x:%02x:%02x:%02x, slice_number = %#x, id = %s, "
-        "dynamic = %d, updated_at = %" PRId64 " ).",
-        entry->type, mac[ 0 ], mac[ 1 ], mac[ 2 ], mac[ 3 ], mac[ 4 ], mac[ 5 ], slice_number, id,
-        entry->dynamic, ( int64_t ) entry->updated_at );
-
-  if ( lookup_hash_entry( slice_db.mac_slice_map, entry ) != NULL ) {
-    xfree( entry );
-    warn( "Mac-slice entry is already registered ( mac = %02x:%02x:%02x:%02x:%02x:%02x, slice_number = %#x, dynamic = %d ).",
-          mac[ 0 ], mac[ 1 ], mac[ 2 ], mac[ 3 ], mac[ 4 ], mac[ 5 ], slice_number, entry->dynamic );
-    return;
-  }
-
+  info( "Adding a mac-slice binding ( mac = %02x:%02x:%02x:%02x:%02x:%02x, "
+        "id = %s, slice_number = %#x ).",
+        entry->mac[ 0 ], entry->mac[ 1 ], entry->mac[ 2 ], entry->mac[ 3 ], entry->mac[ 4 ], entry->mac[ 5 ],
+        entry->id, entry->slice_number );
   insert_hash_entry( slice_db.mac_slice_map, entry, entry );
   slice->n_mac_slice_maps++;
 }
@@ -338,39 +387,230 @@ add_mac_slice_binding( const uint8_t *mac, uint16_t slice_number, const char *id
 
 static void
 add_port_mac_slice_binding( uint64_t datapath_id, uint16_t port, uint16_t vid, uint8_t *mac, uint16_t slice_number, const char *id ) {
-  binding_entry *entry;
+  assert( mac );
+  assert( id );
 
-  entry = xmalloc( sizeof( binding_entry ) );
-
-  memset( entry, 0, sizeof( binding_entry ) );
-  entry->type = BINDING_TYPE_PORT_MAC;
-  entry->datapath_id = datapath_id;
-  entry->port = port;
-  entry->vid = vid;
-  memcpy( entry->mac, mac, OFP_ETH_ALEN );
-  entry->slice_number = slice_number;
-  memset( entry->id, '\0', sizeof( entry->id ) );
-  if ( id != NULL ) {
-    memcpy( entry->id, id, sizeof( entry->id ) - 1 );
-  }
-  entry->dynamic = false;
-  entry->updated_at = time( NULL );
-
-  info( "Adding a port_mac-slice binding ( type = %#x, datapath_id = %#" PRIx64 ",port = %#x, vid = %#x, "
-        "mac = %02x:%02x:%02x:%02x:%02x:%02x:, slice_number = %#x, id = %s, dynamic = %d, updated_at = %" PRId64 " ).",
-        entry->type, datapath_id, port, vid, mac[ 0 ], mac[ 1 ], mac[ 2 ], mac[ 3 ], mac[ 4 ], mac[ 5 ],
-        slice_number, id, entry->dynamic, ( int64_t ) entry->updated_at );
-
-  if ( lookup_hash_entry( slice_db.port_mac_slice_map, entry ) != NULL ) {
-    xfree( entry );
-    warn( "Port_mac-slice entry is already registered ( type = %#x, datapath_id = %#" PRIx64 ",port = %#x, vid = %#x, "
-          "mac = %02x:%02x:%02x:%02x:%02x:%02x:, slice_number = %#x, id = %s, dynamic = %d ).",
-          entry->type, datapath_id, port, vid, mac[ 0 ], mac[ 1 ], mac[ 2 ], mac[ 3 ], mac[ 4 ], mac[ 5 ],
-          slice_number, id, entry->dynamic );
+  slice_entry *slice = lookup_hash_entry( slice_db.slices, &slice_number );
+  if ( slice == NULL ) {
+    error( "Invalid slice number ( %#x ).", slice_number );
     return;
   }
 
+  binding_entry e;
+
+  /* set required parameters to lookup_hash_entry() in port_mac_slice_map */
+  memset( &e, 0, offsetof( binding_entry, id ) );
+  e.type = BINDING_TYPE_PORT_MAC;
+  e.datapath_id = datapath_id;
+  e.port = port;
+  e.vid = vid;
+  memcpy( e.mac, mac, OFP_ETH_ALEN );
+
+  binding_entry *found = lookup_hash_entry( slice_db.port_mac_slice_map, &e );
+  if ( found != NULL ) {
+    found->found_in_sqlite = true;
+    debug( "Port_mac-slice entry is already registered ( datapath_id = %#" PRIx64 ", port = %#x, vid = %#x, "
+           "mac = %02x:%02x:%02x:%02x:%02x:%02x, "
+           "id = %s, slice_number = %#x ).",
+           found->datapath_id, found->port, found->vid,
+           found->mac[ 0 ], found->mac[ 1 ], found->mac[ 2 ], found->mac[ 3 ], found->mac[ 4 ], found->mac[ 5 ],
+           found->id, found->slice_number );
+    return;
+  }
+
+  binding_entry *entry = xmalloc( sizeof( binding_entry ) );
+  memset( entry, 0, sizeof( binding_entry ) );
+  memcpy( entry, &e, offsetof( binding_entry, id ) );
+  entry->slice_number = slice_number;
+  memset( entry->id, '\0', BINDING_ID_LENGTH );
+  memcpy( entry->id, id, BINDING_ID_LENGTH - 1 );
+  entry->dynamic = false;
+  entry->found_in_sqlite = true;
+  entry->updated_at = time( NULL );
+
+  info( "Adding a port_mac-slice binding ( datapath_id = %#" PRIx64 ", port = %#x, vid = %#x, "
+        "mac = %02x:%02x:%02x:%02x:%02x:%02x, "
+        "id = %s,  slice_number = %#x ).",
+        entry->datapath_id, entry->port, entry->vid,
+        entry->mac[ 0 ], entry->mac[ 1 ], entry->mac[ 2 ], entry->mac[ 3 ], entry->mac[ 4 ], entry->mac[ 5 ],
+        entry->id, entry->slice_number );
   insert_hash_entry( slice_db.port_mac_slice_map, entry, entry );
+}
+
+
+typedef struct {
+  uint16_t slice_number;
+  bool binding_exists;
+} check_bindig_data;
+
+
+static void
+check_no_bindig_in_the_slice( void *key, void *value, void *user_data ) {
+  binding_entry *b = value;
+  check_bindig_data *data = user_data;
+
+  if ( b->slice_number == data->slice_number ) {
+    data->binding_exists = true;
+
+    switch ( b->type ) {
+    case BINDING_TYPE_PORT:
+    {
+      error( "a port-slice binding exists ( datapath_id = %#" PRIx64 ", port = %#x, vid = %#x, "
+             "id = %s,  slice_number = %#x ).",
+             b->datapath_id, b->port, b->vid,
+             b->id, b->slice_number );
+    }
+    break;
+
+    case BINDING_TYPE_MAC:
+    {
+      error( "a mac-slice binding exists ( mac = %02x:%02x:%02x:%02x:%02x:%02x, "
+             "id = %s, slice_number = %#x ).",
+             b->mac[ 0 ], b->mac[ 1 ], b->mac[ 2 ], b->mac[ 3 ], b->mac[ 4 ], b->mac[ 5 ],
+             b->id, b->slice_number );
+    }
+    break;
+
+    case BINDING_TYPE_PORT_MAC:
+    {
+      error( "a port_mac-slice binding exists ( datapath_id = %#" PRIx64 ", port = %#x, vid = %#x,"
+             "mac = %02x:%02x:%02x:%02x:%02x:%02x, "
+             "id = %s,  slice_number = %#x ).",
+             b->datapath_id, b->port, b->vid,
+             b->mac[ 0 ], b->mac[ 1 ], b->mac[ 2 ], b->mac[ 3 ], b->mac[ 4 ], b->mac[ 5 ],
+             b->id, b->slice_number );
+    }
+    break;
+
+    default:
+      error( "Undefined binding type ( type = %u ).", b->type );
+    }
+  }
+}
+
+
+static void
+delete_unfounded_in_sqlite_slices() {
+  slice_entry *slice;
+  hash_iterator iter;
+  hash_entry *entry;
+  check_bindig_data data;
+
+  init_hash_iterator( slice_db.slices, &iter );
+  while ( ( entry = iterate_hash_next( &iter ) ) != NULL ) {
+    if ( entry->value != NULL ) {
+      slice = entry->value;
+      if ( slice->found_in_sqlite == false ) {
+        info( "Deleting a slice entry ( number = %#x, id = %s )", slice->number, slice->id );
+
+        data.slice_number = slice->number;
+        data.binding_exists = false;
+
+        foreach_hash( slice_db.port_slice_map, check_no_bindig_in_the_slice, &data );
+        foreach_hash( slice_db.mac_slice_map, check_no_bindig_in_the_slice, &data );
+        foreach_hash( slice_db.port_mac_slice_map, check_no_bindig_in_the_slice, &data );
+
+        if ( data.binding_exists ) {
+          error( "Failed to delete slice entry." );
+        }
+        else {
+          delete_hash_entry( slice_db.slices, entry->value );
+          xfree( entry->value );
+        }
+      }
+    }
+  }
+}
+
+static void
+delete_flows_related_to_mac( const uint8_t *mac ) {
+  struct ofp_match match;
+
+  memset( &match, 0, sizeof( struct ofp_match ) );
+  match.wildcards = OFPFW_ALL - OFPFW_DL_SRC;
+  memcpy( match.dl_src, mac, OFP_ETH_ALEN );
+  teardown_path_by_match( match );
+
+  memset( &match, 0, sizeof( struct ofp_match ) );
+  match.wildcards = OFPFW_ALL - OFPFW_DL_DST;
+  memcpy( match.dl_dst, mac, OFP_ETH_ALEN );
+  teardown_path_by_match( match );
+}
+
+
+static void
+delete_unfounded_in_sqlite_bindings() {
+  binding_entry *binding;
+  hash_iterator iter;
+  hash_entry *entry;
+
+  init_hash_iterator( slice_db.port_mac_slice_map, &iter );
+  while ( ( entry = iterate_hash_next( &iter ) ) != NULL ) {
+    if ( entry->value != NULL ) {
+      binding = entry->value;
+      if ( binding->found_in_sqlite == false ) {
+        info( "Deleting a port_mac-slice binding ( datapath_id = %#" PRIx64 ", port = %#x, vid = %#x, "
+              "mac = %02x:%02x:%02x:%02x:%02x:%02x, "
+              "id = %s,  slice_number = %#x ).",
+              binding->datapath_id, binding->port, binding->vid,
+              binding->mac[ 0 ], binding->mac[ 1 ], binding->mac[ 2 ],
+              binding->mac[ 3 ], binding->mac[ 4 ], binding->mac[ 5 ],
+              binding->id, binding->slice_number );
+
+        delete_flows_related_to_mac( binding->mac );
+
+        delete_hash_entry( slice_db.port_mac_slice_map, entry->value );
+        xfree( entry->value );
+      }
+    }
+  }
+
+  /*
+   * NOTE: Check if any mac binding is deleted. Since a dynamic port binding is
+   *       automatically created from a mac binding, if any mac binding is deleted,
+   *       all dynamic port bindings are cleaned in the deletion of port bindings.
+   */
+  bool mac_binding_deleted = false;
+
+  init_hash_iterator( slice_db.mac_slice_map, &iter );
+  while ( ( entry = iterate_hash_next( &iter ) ) != NULL ) {
+    if ( entry->value != NULL ) {
+      binding = entry->value;
+      if ( binding->found_in_sqlite == false ) {
+        info( "Deleting a mac-slice binding ( mac = %02x:%02x:%02x:%02x:%02x:%02x, "
+              "id = %s,  slice_number = %#x ).",
+              binding->mac[ 0 ], binding->mac[ 1 ], binding->mac[ 2 ],
+              binding->mac[ 3 ], binding->mac[ 4 ], binding->mac[ 5 ],
+              binding->id, binding->slice_number );
+
+        delete_flows_related_to_mac( binding->mac );
+
+        delete_hash_entry( slice_db.mac_slice_map, entry->value );
+        xfree( entry->value );
+        mac_binding_deleted = true;
+      }
+    }
+  }
+
+  init_hash_iterator( slice_db.port_slice_map, &iter );
+  while ( ( entry = iterate_hash_next( &iter ) ) != NULL ) {
+    if ( entry->value != NULL ) {
+      binding = entry->value;
+      if ( ( binding->found_in_sqlite == false && binding->dynamic == false ) ||
+           ( mac_binding_deleted == true && binding->dynamic == true ) ) {
+        info( "Deleting a port-slice binding ( datapath_id = %#" PRIx64 ", port = %#x, vid = %#x, "
+              "id = %s,  slice_number = %#x ).",
+              binding->datapath_id, binding->port, binding->vid,
+              binding->id, binding->slice_number );
+
+        teardown_path_by_port( binding->datapath_id, binding->port );
+
+        delete_hash_entry( slice_db.port_slice_map, entry->value );
+        delete_hash_entry( slice_db.port_slice_vid_map, entry->value );
+        xfree( entry->value );
+      }
+    }
+  }
 }
 
 
@@ -521,16 +761,6 @@ delete_dynamic_port_slice_bindings( uint64_t datapath_id, uint16_t port ) {
 
 
 static void
-delete_all_flows(){
-  struct ofp_match match;
-  memset( &match, 0, sizeof( struct ofp_match ) );
-  match.wildcards = OFPFW_ALL;
-
-  teardown_path_by_match( match );
-}
-
-
-static void
 load_slice_definitions_from_sqlite( void *user_data ) {
   UNUSED( user_data );
 
@@ -555,12 +785,7 @@ load_slice_definitions_from_sqlite( void *user_data ) {
 
   last_slice_db_mtime = st.st_mtime;
 
-  delete_slice_db();
-
-  // FIXME: delete affected entries only
-  delete_all_flows();
-
-  create_slice_db();
+  clean_found_in_sqlite_flags();
 
   ret = sqlite3_open( slice_db_file, &db );
   if ( ret ) {
@@ -586,6 +811,9 @@ load_slice_definitions_from_sqlite( void *user_data ) {
   }
 
   sqlite3_close( db );
+
+  delete_unfounded_in_sqlite_bindings();
+  delete_unfounded_in_sqlite_slices();
 
   return;
 }

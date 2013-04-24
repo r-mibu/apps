@@ -81,6 +81,7 @@ bool setup_path( path *path, setup_handler setup_callback, void *setup_user_data
 
 bool teardown_path( uint64_t in_datapath_id, struct ofp_match match, uint16_t priority );
 bool teardown_path_by_match( struct ofp_match match );
+bool teardown_path_by_port( uint64_t datapath_id, uint16_t port );
 
 const path *lookup_path( uint64_t in_datapath_id, struct ofp_match match, uint16_t priority );
 bool lookup_path_by_match( struct ofp_match match, int *n_paths, path **paths );

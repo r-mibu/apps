@@ -462,6 +462,44 @@ teardown_path_by_match( struct ofp_match match ) {
 }
 
 
+static bool
+is_include_port( list_element *hops, uint64_t datapath_id, uint16_t port ) {
+  list_element *e = hops;
+
+  while ( e != NULL ) {
+    if ( e->data != NULL ) {
+      hop *h = e->data;
+      if ( datapath_id == h->datapath_id && ( port == h->in_port || port == h->out_port ) ) {
+        return true;
+      }
+    }
+    e = e->next;
+  }
+
+  return false;
+}
+
+
+bool
+teardown_path_by_port( uint64_t datapath_id, uint16_t port ) {
+  bool ret = true;
+  hash_iterator iter;
+  hash_entry *e;
+
+  init_hash_iterator( path_db.id, &iter );
+  while ( ( ( e = iterate_hash_next( &iter ) ) != NULL ) ) {
+    path_private *entry = e->value;
+    if ( is_include_port( entry->public.hops, datapath_id, port ) ) {
+      if ( !send_teardown_request( entry->id ) ) {
+        ret = false;
+      }
+    }
+  }
+
+  return ret;
+}
+
+
 const path *
 lookup_path( uint64_t in_datapath_id, struct ofp_match match, uint16_t priority ) {
   path_private criteria;

@@ -61,6 +61,21 @@ Given /^the slice table from script "([^"]*)"$/ do | script |
 end
 
 
+When /^I delete port binding "(.*)" from slice "(.*)"$/ do | binding, slice |
+  slice_delete_port( slice, binding )
+end
+
+
+When /^I delete mac binding "(.*)" from slice "(.*)"$/ do | binding, slice |
+  slice_delete_mac( slice, binding )
+end
+
+
+When /^I delete mac binding "(.*)" on port "(.*)" from  slice "(.*)"$/ do | binding, port, slice |
+  slice_delete_port_mac( slice, port, binding )
+end
+
+
 ### Local variables:
 ### mode: Ruby
 ### coding: utf-8-unix

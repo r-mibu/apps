@@ -54,6 +54,7 @@ typedef struct {
   filter_match match;
   uint16_t priority;
   uint8_t action;
+  bool found_in_sqlite;
 } filter_entry;
 
 
@@ -236,18 +237,32 @@ lookup_filter_strict( filter_match match, uint16_t priority ) {
 
 
 static void
+delete_filter_found_in_sqlite_flag( void *key, void *value, void *user_data ) {
+  ( ( filter_entry * ) value)->found_in_sqlite = false;
+}
+
+
+static void
+clean_found_in_sqlite_flags() {
+  foreach_hash( filter_db.hash, delete_filter_found_in_sqlite_flag, NULL );
+}
+
+
+static void
 add_filter_entry( filter_match match, uint16_t priority, uint8_t action ) {
-  filter_entry *new_entry;
+  filter_entry *found, *new_entry;
 
   char match_str[ 1024 ];
 
-  match_to_string( &match.ofp_match, match_str, sizeof( match_str ) );
-  info( "Adding a filter entry ( wildcards = %#x, in_datapath_id = %#" PRIx64 ", slice_number = %#x, ofp_match = [%s], priority = %u, action = %#x ).",
-        match.wildcards, match.in_datapath_id, match.slice_number, match_str, priority, action );
 
-  new_entry = lookup_filter_strict( match, priority );
-  if ( new_entry != NULL ) {
-    warn( "Filter entry is already registered." );
+  found = lookup_filter_strict( match, priority );
+  if ( found != NULL ) {
+    match_to_string( &found->match.ofp_match, match_str, sizeof( match_str ) );
+    debug( "Filter entry is already registered ( wildcards = %#x, in_datapath_id = %#" PRIx64 ", "
+           "slice_number = %#x, ofp_match = [%s], priority = %u, action = %#x ).",
+           match.wildcards, match.in_datapath_id,
+           match.slice_number, match_str, priority, action );
+    found->found_in_sqlite = true;
     return;
   }
 
@@ -261,6 +276,13 @@ add_filter_entry( filter_match match, uint16_t priority, uint8_t action ) {
     new_entry->priority = priority;
   }
   new_entry->action = action;
+  new_entry->found_in_sqlite = true;
+
+  match_to_string( &new_entry->match.ofp_match, match_str, sizeof( match_str ) );
+  info( "Adding a filter entry ( wildcards = %#x, in_datapath_id = %#" PRIx64 ", "
+        "slice_number = %#x, ofp_match = [%s], priority = %u, action = %#x ).",
+        new_entry->match.wildcards, new_entry->match.in_datapath_id,
+        new_entry->match.slice_number, match_str, new_entry->priority, new_entry->action );
 
   if ( match.wildcards == 0 && match.ofp_match.wildcards == 0 ) {
     insert_hash_entry( filter_db.hash, &new_entry->match, new_entry );
@@ -299,6 +321,53 @@ string_to_uint64( const char *str ) {
   }
 
   return u64;
+}
+
+
+static void
+delete_unfounded_in_sqlite_filters() {
+  filter_entry *filter;
+  hash_iterator iter;
+  hash_entry *entry;
+  char match_str[ 1024 ];
+
+  init_hash_iterator( filter_db.hash, &iter );
+  while ( ( entry = iterate_hash_next( &iter ) ) != NULL ) {
+    if ( entry->value != NULL ){
+      filter = entry->value;
+      if ( filter->found_in_sqlite == false ) {
+        match_to_string( &filter->match.ofp_match, match_str, sizeof( match_str ) );
+        info( "Deleting a filter entry ( wildcards = %#x, in_datapath_id = %#" PRIx64 ", "
+              "slice_number = %#x, ofp_match = [%s], priority = %u, action = %#x ).",
+              filter->match.wildcards, filter->match.in_datapath_id,
+              filter->match.slice_number, match_str, filter->priority, filter->action );
+
+        delete_hash_entry( filter_db.hash, &filter->match );
+        xfree( entry->value );
+      }
+    }
+  }
+
+  list_element *e;
+  list_element *list_head = filter_db.list;
+  for ( e = list_head; e->next != NULL; e = e->next ) {
+    filter = e->next->data;
+    while ( filter != NULL && filter->found_in_sqlite == false ) {
+      list_element *delete_me = e->next;
+      e->next = e->next->next;
+      xfree( filter );
+      xfree( delete_me );
+      filter = e->next->data;
+    }
+  }
+  if ( list_head != NULL ) {
+    filter = list_head->data;
+    if ( filter != NULL && filter->found_in_sqlite == false ) {
+      filter_db.list = list_head->next;
+      xfree( filter );
+      xfree( list_head );
+    }
+  }
 }
 
 
@@ -383,8 +452,7 @@ load_filter_entries_from_sqlite( void *user_data ) {
 
   last_filter_db_mtime = st.st_mtime;
 
-  delete_filter_db();
-  create_filter_db();
+  clean_found_in_sqlite_flags();
 
   ret = sqlite3_open( filter_db_file, &db );
   if ( ret ) {
@@ -402,6 +470,8 @@ load_filter_entries_from_sqlite( void *user_data ) {
   }
 
   sqlite3_close( db );
+
+  delete_unfounded_in_sqlite_filters();
 
   return;
 }

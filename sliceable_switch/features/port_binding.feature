@@ -225,3 +225,128 @@ Feature: control multiple openflow switchies using sliceable_switch
     And the total number of rx packets should be:
       | host1 | host2 | host3 | host4 |
       |     1 |     2 |     0 |     0 |
+
+
+  Scenario: One openflow switch, one slice, three servers, port binding ( update config )
+    Given the following slice records
+      | slice_id | description |
+      | test1    | slice1      |
+    And the following port binding records
+      | slice_id | dpid  | port | vid    | binding_id |
+      | test1    | 0x1   | 3    | 0xffff | host1      |
+    And the following filter records
+      | filter_id | rule_specification      |
+      | default   | priority=0 action=ALLOW |
+    When I try trema run "../apps/sliceable_switch/sliceable_switch -s tmp/slice.db -a tmp/filter.db" with following configuration (backgrounded):
+      """
+      vswitch("sliceable_switch1") { datapath_id "0x1" }
+
+      vhost("host1") { mac "00:00:00:00:00:01" }
+      vhost("host2") { mac "00:00:00:00:00:02" }
+      vhost("host3") { mac "00:00:00:00:00:03" }
+
+      link "sliceable_switch1", "host1"
+      link "sliceable_switch1", "host2"
+      link "sliceable_switch1", "host3"
+
+      run { path "../apps/topology/topology" }
+      run { path "../apps/topology/topology_discovery" }
+      run { path "../apps/flow_manager/flow_manager" }
+
+      event :port_status => "topology", :packet_in => "filter", :state_notify => "topology"
+      filter :lldp => "topology_discovery", :packet_in => "sliceable_switch"
+      """
+      And wait until "sliceable_switch" is up
+      And *** sleep 15 ***
+
+    # update_fdb
+    When I send 1 packets from host1 to host2
+    And I send 1 packets from host2 to host3
+    And I send 1 packets from host3 to host1
+    And I reset stats to host1
+    And I reset stats to host2
+    And I reset stats to host3
+
+    When I send 1 packets from host1 to host2
+    And I send 1 packets from host2 to host1
+    And I send 1 packets from host1 to host3
+    And I send 1 packets from host3 to host1
+    Then the total number of tx packets should be:
+      | host1 | host2 | host3 |
+      |     2 |     1 |     1 |
+    And the total number of rx packets should be:
+      | host1 | host2 | host3 |
+      |     0 |     0 |     0 |
+
+    Given the following port binding records
+      | slice_id | dpid  | port | vid    | binding_id |
+      | test1    | 0x1   | 1    | 0xffff | host2      |
+      | test1    | 0x1   | 2    | 0xffff | host3      |
+    # wait to expire Discard flow entries.
+    When *** sleep 65 ***
+    And I reset stats to host1
+    And I reset stats to host2
+    And I reset stats to host3
+
+    When I send 1 packets from host1 to host2
+    Then the total number of tx packets should be:
+      | host1 | host2 | host3 |
+      |     1 |     0 |     0 |
+    And the total number of rx packets should be:
+      | host1 | host2 | host3 |
+      |     0 |     1 |     0 |
+
+    When I send 1 packets from host2 to host1
+    Then the total number of tx packets should be:
+      | host1 | host2 | host3 |
+      |     1 |     1 |     0 |
+    And the total number of rx packets should be:
+      | host1 | host2 | host3 |
+      |     1 |     1 |     0 |
+
+    When I send 1 packets from host1 to host3
+    Then the total number of tx packets should be:
+      | host1 | host2 | host3 |
+      |     2 |     1 |     0 |
+    And the total number of rx packets should be:
+      | host1 | host2 | host3 |
+      |     1 |     1 |     1 |
+
+    When I send 1 packets from host3 to host1
+    Then the total number of tx packets should be:
+      | host1 | host2 | host3 |
+      |     2 |     1 |     1 |
+    And the total number of rx packets should be:
+      | host1 | host2 | host3 |
+      |     2 |     1 |     1 |
+
+    When I delete port binding "host3" from slice "test1"
+    And *** sleep 5 ***
+    And I reset stats to host1
+    And I reset stats to host2
+    And I reset stats to host3
+
+    When I send 1 packets from host1 to host2
+    Then the total number of tx packets should be:
+      | host1 | host2 | host3 |
+      |     1 |     0 |     0 |
+    And the total number of rx packets should be:
+      | host1 | host2 | host3 |
+      |     0 |     1 |     0 |
+
+    When I send 1 packets from host2 to host1
+    Then the total number of tx packets should be:
+      | host1 | host2 | host3 |
+      |     1 |     1 |     0 |
+    And the total number of rx packets should be:
+      | host1 | host2 | host3 |
+      |     1 |     1 |     0 |
+
+    When I send 1 packets from host1 to host3
+    And I send 1 packets from host3 to host1
+    Then the total number of tx packets should be:
+      | host1 | host2 | host3 |
+      |     2 |     1 |     1 |
+    And the total number of rx packets should be:
+      | host1 | host2 | host3 |
+      |     1 |     1 |     0 |

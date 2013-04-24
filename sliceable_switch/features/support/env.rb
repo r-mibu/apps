@@ -110,6 +110,24 @@ def slice_add_port_mac args
 end
 
 
+def slice_delete_port( slice_id, binding_id )
+  slice = File.join( src_directory, "slice" )
+  run "#{ slice } delete-port #{ slice_id } #{ binding_id }"
+end
+
+
+def slice_delete_mac( slice_id, binding_id )
+  slice = File.join( src_directory, "slice" )
+  run "#{ slice } delete-mac #{ slice_id } #{ binding_id }"
+end
+
+
+def slice_delete_port_mac( slice_id, port_id, binding_id )
+  slice = File.join( src_directory, "slice" )
+  run "#{ slice } delete-port-mac #{ slice_id } #{ port_id } #{ binding_id }"
+end
+
+
 def create_filter_table
   if FileTest.exists?( filter_db_file )
     run "sqlite3 #{ filter_db_file } 'delete from filter;'"
